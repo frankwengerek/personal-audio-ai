@@ -1,45 +1,39 @@
-import openai
 import speech_recognition as sr
 import requests
 import playsound
 import sys
 from configparser import ConfigParser
+from ai import AI
+from trigger import Trigger
+from triggers import Triggers
 
 # Config-Datei auslesen
 config = ConfigParser()
 config.read('ai_config.cfg')
 
 # OpenAI API initialisieren
-openai.api_key = config.get('openai', 'api_key')
+ai = AI(config.get('openai', 'api_key'))
 
 # User-Name initialisieren
 user_name = config.get('username', 'name')
 
-# Recognizer-Objekt und Trigger Variablen
+# Recognizer-Objekt
 r = sr.Recognizer()
-gibson_trigger = "gibson" #gpt-4
-luna_trigger = "luna" #gpt-3.5-turbo
-stop_trigger = "exit" #beendet das Programm
 
-def get_trigger(text):
-    if gibson_trigger in text.lower():
-        return gibson_trigger
-    elif luna_trigger in text.lower():
-        return luna_trigger
-    elif stop_trigger in text.lower():
-        sys.exit()
-    else:
-        return None
+# Define triggers
+trigger_luna = Trigger("Luna", "luna", "gpt-3.5-turbo", config.get('voice_ids', 'luna'))
+trigger_gibson = Trigger("Gibson", "gibson", "gpt-4", config.get('voice_ids', 'gibson'))
+trigger_stop = Trigger("Stop", "exit", None, None)
+
+triggers = Triggers()
+triggers.add_trigger(trigger_luna)
+triggers.add_trigger(trigger_gibson)
+triggers.add_trigger(trigger_stop)
     
 # Sprachsynthese mit Elevenlabs und zwei möglichen Stimmen   
-def text_to_speech(response, trigger):
+def text_to_speech(voice_id, text):
     CHUNK_SIZE = 1024
-    if trigger == "luna":
-        voice = config.get('voices', 'luna_voice_id')
-    elif trigger == "gibson":
-        voice = config.get('voices', 'gibson_voice_id')
-        
-    url = "https://api.elevenlabs.io/v1/text-to-speech/"+voice+"/stream"
+    url = "https://api.elevenlabs.io/v1/text-to-speech/"+voice_id+"/stream"
     
     headers = {
         "Accept": "audio/mpeg",
@@ -48,7 +42,7 @@ def text_to_speech(response, trigger):
     }
     
     data = {
-        "text": response,
+        "text": text,
         "model_id": "eleven_multilingual_v1",
         "voice_settings": {
             "stability": 0.75,
@@ -80,17 +74,21 @@ def main():
                 try:
                     text = r.recognize_google(audio, language='de-de')
                     print(f"Du: {text}")
-                    trigger = get_trigger(text) #Trigger erkennen
-                    if trigger is not None:
-                        break
-                    else:
+                    trigger = triggers.detect_trigger(text)
+                    
+                    if trigger is None:
                         print("Kein Trigger-Wort. Versuche es noch einmal.")
+                    elif trigger.name == trigger_stop.name:
+                        sys.exit()
+                    else:
+                        break
+                        
                 except Exception as e:
                     print("Fehler bei der Spracherkennung: {0}".format(e))
                     continue
                     
             print("Du kannst den Prompt einfach laut aussprechen. Ich höre dir zu.")
-            text_to_speech('Hallo '+user_name+'. Hier ist '+trigger+'.',trigger)
+            text_to_speech(trigger.voice_id, 'Hallo '+user_name+'. Hier ist '+trigger.name+'.')
             
             audio = r.listen(source)
             
@@ -100,46 +98,17 @@ def main():
             except Exception as e:
                 print("Fehler bei der Spracherkennung: {0}".format(e))
                 continue
-            
-            if trigger == gibson_trigger:
-                # Gibson - GPT-4 API
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content":
-                        config.get('roles', 'gibson')+" Dein Name ist Gibson. Beantworte alle Fragen in dieser Rolle und rede mich dabei mit "+user_name+" an."},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=4096,
-                    frequency_penalty=0.3,
-                    presence_penalty=0.3,
-                    n=1,
-                    stop=["\nDu:"],
-                )
-                
-                ai_response = response["choices"][0]["message"]["content"]
 
-            else:
-                # Luna - GPT-3.5-turbo API
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content":
-                        config.get('roles', 'luna')+" Dein Name ist Luna. Beantworte alle Fragen in dieser Rolle und rede mich dabei mit "+user_name+" an."},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.8,
-                    max_tokens=2048,
-                    frequency_penalty=0.3,
-                    presence_penalty=0.3,
-                    n=1,
-                    stop=["\nDu:"],
-                )
-
-                ai_response = response["choices"][0]["message"]["content"]
-                
-        print(f"{trigger}:", ai_response)
-        text_to_speech(ai_response, trigger) # Sprachausgabe der AIs, je nach Trigger-Wort, Gibson oder Luna
+            # Forward trigger to openai              
+            messages = [
+                {"role": "system", "content": config.get('roles', trigger.keyword)},
+                {"role": "user", "content": user_prompt},
+            ]                
+            response = ai.ask(trigger.gpt_version, messages)            
+            ai_response = response["choices"][0]["message"]["content"]
+                                
+        print(f"{trigger.name}:", ai_response)
+        text_to_speech(trigger.voice_id, ai_response) # Sprachausgabe der AIs, je nach Trigger-Wort, Gibson oder Luna
+        
 if __name__ == "__main__":
     main()                 
